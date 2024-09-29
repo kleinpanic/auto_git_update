@@ -1,5 +1,29 @@
 #!/usr/bin/env bash
 
+# Declare the security variable
+security_variable=1  # Change this value as needed (0, 1, or 2)
+
+# Check the value of the security variable
+if [ "$security_variable" -eq 0 ]; then
+    echo "Error: security_variable is set to 0. Exiting the script."
+    exit 1
+fi
+
+# If the security variable is 2, continue without any conditions
+if [ "$security_variable" -eq 2 ]; then
+    echo "security_variable is set to 2. Running the script without further checks."
+    # Continue with the rest of your script
+else
+    # If the security variable is 1, check if today is Friday
+    DAY_OF_WEEK=$(date +%A)
+    if [ "$DAY_OF_WEEK" = "Friday" ]; then
+        echo "Today is Friday. Continuing with the script."
+    else
+        echo "Error: Today is not Friday (Today is $DAY_OF_WEEK). Exiting the script."
+        exit 1
+    fi
+fi
+
 # Check if required commands are available
 for cmd in git nmcli msmtp ssh scp gh; do
     if ! command -v "$cmd" &>/dev/null; then
@@ -39,25 +63,18 @@ check_wifi() {
 get_repo_dirs() {
     local valid_dirs=()
     
-    echo "Reading directories from $TXT_FILE..."  # Debugging line
-
     while IFS= read -r repo_dir; do
         # Trim whitespace and skip empty lines
         repo_dir=$(echo "$repo_dir" | xargs)
         [ -z "$repo_dir" ] && continue
         
-        echo "Processing: '$repo_dir'"  # Debugging line to show each line being processed
-
         # Check if the directory is valid and contains a .git folder
         if [ -d "$repo_dir" ] && [ -d "$repo_dir/.git" ]; then
-            echo "Valid Git repository found: '$repo_dir'"  # Debugging line
             valid_dirs+=("$repo_dir")
-        else
-            echo "Invalid directory or not a Git repository: '$repo_dir'"  # Debugging line
         fi
     done < "$TXT_FILE"
     
-    echo "Valid directories: ${valid_dirs[@]}"  # Final debug line showing valid directories
+    # Output only the valid directories without any additional text
     echo "${valid_dirs[@]}"
 }
 
@@ -65,16 +82,17 @@ get_repo_dirs() {
 create_github_repo() {
     local repo_name="$1"
     local repo_dir="$2"
-    echo "Attempting to create GitHub repo for repo $repo_name" >> "$REPORT"
+    local repo_number="$3"
+    echo "Attempting to create GitHub repo for repo $repo_number ($repo_name)" >> "$REPORT"
     
     # Use GitHub CLI to create the repo
     if gh repo create "$repo_name" --public --source="$repo_dir" --remote=origin --push; then
-        echo "Successfully created GitHub repository $repo_name" >> "$REPORT"
-        echo "Repo $repo_name: GHS (GitHub Repo Created Successfully)" >> "$SMS_REPORT"
+        echo "Successfully created GitHub repository #$repo_number: $repo_name" >> "$REPORT"
+        echo "Repo #$repo_number $repo_name: GHS (GitHub Repo Created Successfully)" >> "$SMS_REPORT"
         
         # Check if the repository has existing commits
         if [ -d "$repo_dir/.git" ] && [ "$(git -C "$repo_dir" rev-parse HEAD)" ]; then
-            echo "Repository has existing commits. Attempting to add remote and push." >> "$REPORT"
+            echo "Repository #$repo_number has existing commits. Attempting to add remote and push." >> "$REPORT"
             
             # Add the GitHub remote if not already added
             git remote add origin "git@github.com:kleinpanic/$repo_name.git" 2>/dev/null || true
@@ -84,17 +102,17 @@ create_github_repo() {
             
             # Push to GitHub
             if git push -u origin main; then
-                echo "Existing repository pushed successfully to GitHub." >> "$REPORT"
-                echo "Repo $repo_name: Pushed Successfully" >> "$SMS_REPORT"
+                echo "Existing repository #$repo_number pushed successfully to GitHub." >> "$REPORT"
+                echo "Repo #$repo_number $repo_name: Pushed Successfully" >> "$SMS_REPORT"
             else
-                echo "Failed to push the existing repository to GitHub." >> "$REPORT"
-                echo "Repo $repo_name: Push Failed" >> "$SMS_REPORT"
+                echo "Failed to push the existing repository #$repo_number to GitHub." >> "$REPORT"
+                echo "Repo #$repo_number $repo_name: Push Failed" >> "$SMS_REPORT"
             fi
         fi
         return 0
     else
-        echo "Failed to create GitHub repository $repo_name" >> "$REPORT"
-        echo "Repo $repo_name: GCF (GitHub Repo Creation Failed)" >> "$SMS_REPORT"
+        echo "Failed to create GitHub repository #$repo_number: $repo_name" >> "$REPORT"
+        echo "Repo #$repo_number $repo_name: GCF (GitHub Repo Creation Failed)" >> "$SMS_REPORT"
         return 1
     fi
 }
@@ -135,16 +153,16 @@ update_repo() {
     local repo_number="$2"
     cd "$repo_dir" || return 1
 
-    echo "Processing repository $repo_number located at $repo_dir" >> "$REPORT"
+    echo "Processing repository #$repo_number located at $repo_dir" >> "$REPORT"
 
     local github_exists=true
     if ! check_github_remote; then
-        echo "No valid GitHub repository found for repo $repo_number." >> "$REPORT"
+        echo "No valid GitHub repository found for repo #$repo_number." >> "$REPORT"
         github_exists=false
         
         if check_wifi; then
             repo_name=$(basename "$repo_dir")
-            create_github_repo "$repo_name" "$repo_dir"
+            create_github_repo "$repo_name" "$repo_dir" "$repo_number"
             github_exists=true
         fi
     fi
@@ -152,20 +170,20 @@ update_repo() {
     if [ "$github_exists" = true ]; then
         git fetch origin &>/dev/null
         if ! git merge origin/main --no-commit --no-ff; then
-            echo "Merge conflict detected in repo $repo_number" >> "$REPORT"
-            echo "Repo $repo_number: MC" >> "$SMS_REPORT"
+            echo "Merge conflict detected in repo #$repo_number" >> "$REPORT"
+            echo "Repo #$repo_number: MC" >> "$SMS_REPORT"
             git merge --abort
             return 1
         fi
     fi
 
     if git diff-index --quiet HEAD --; then
-        echo "No changes detected in repo $repo_number" >> "$REPORT"
+        echo "No changes detected in repo #$repo_number" >> "$REPORT"
         
         if [ "$github_exists" = false ]; then
-            echo "Repo $repo_number: NC-GDE" >> "$SMS_REPORT"
+            echo "Repo #$repo_number: NC-GDE" >> "$SMS_REPORT"
         else
-            echo "Repo $repo_number: NC-GE" >> "$SMS_REPORT"
+            echo "Repo #$repo_number: NC-GE" >> "$SMS_REPORT"
         fi
         
         return 0
@@ -175,25 +193,25 @@ update_repo() {
     git commit -m "Automated update"
 
     if [ "$github_exists" = false ]; then
-        echo "No GitHub repository available for repo $repo_number. Committing locally..." >> "$REPORT"
-        echo "Repo $repo_number: lc-ngr" >> "$SMS_REPORT"
+        echo "No GitHub repository available for repo #$repo_number. Committing locally..." >> "$REPORT"
+        echo "Repo #$repo_number: lc-ngr" >> "$SMS_REPORT"
         return 0
     fi
 
     if check_wifi; then
-        echo "Internet is available. Attempting to push changes..." >> "$REPORT"
+        echo "Internet is available. Attempting to push changes for repo #$repo_number..." >> "$REPORT"
         
         if ! git push origin main; then
-            echo "Failed to push changes in repo $repo_number" >> "$REPORT"
-            echo "Repo $repo_number: PF" >> "$SMS_REPORT"
+            echo "Failed to push changes in repo #$repo_number" >> "$REPORT"
+            echo "Repo #$repo_number: PF" >> "$SMS_REPORT"
             return 1
         else
-            echo "Changes pushed successfully in repo $repo_number" >> "$REPORT"
-            echo "Repo $repo_number: P" >> "$SMS_REPORT"
+            echo "Changes pushed successfully in repo #$repo_number" >> "$REPORT"
+            echo "Repo #$repo_number: P" >> "$SMS_REPORT"
         fi
     else
-        echo "No internet connection. Changes committed locally in repo $repo_number" >> "$REPORT"
-        echo "Repo $repo_number: LC" >> "$SMS_REPORT"
+        echo "No internet connection. Changes committed locally in repo #$repo_number" >> "$REPORT"
+        echo "Repo #$repo_number: LC" >> "$SMS_REPORT"
     fi
 }
 
@@ -217,6 +235,7 @@ total_repos=${#repo_dirs[@]}
 # Loop through each valid directory
 repo_number=1
 for repo_dir in "${repo_dirs[@]}"; do
+    echo "Updating repository #$repo_number: $repo_dir"
     update_repo "$repo_dir" "$repo_number"
     case "$(tail -n 1 "$SMS_REPORT")" in
         *P) pushed_count=$((pushed_count + 1)) ;;
