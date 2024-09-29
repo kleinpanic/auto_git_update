@@ -36,20 +36,29 @@ check_wifi() {
     return $?
 }
 
-# Function to fetch and clean repo directories from the text file
 get_repo_dirs() {
     local valid_dirs=()
-    local invalid_dirs=()
+    
+    echo "Reading directories from $TXT_FILE..."  # Debugging line
+
     while IFS= read -r repo_dir; do
+        # Trim whitespace and skip empty lines
+        repo_dir=$(echo "$repo_dir" | xargs)
+        [ -z "$repo_dir" ] && continue
+        
+        echo "Processing: '$repo_dir'"  # Debugging line to show each line being processed
+
+        # Check if the directory is valid and contains a .git folder
         if [ -d "$repo_dir" ] && [ -d "$repo_dir/.git" ]; then
+            echo "Valid Git repository found: '$repo_dir'"  # Debugging line
             valid_dirs+=("$repo_dir")
         else
-            invalid_dirs+=("$repo_dir")
+            echo "Invalid directory or not a Git repository: '$repo_dir'"  # Debugging line
         fi
     done < "$TXT_FILE"
-    for dir in "${invalid_dirs[@]}"; do
-        sed -i "\|$dir|d" "$TXT_FILE"
-    done
+    
+    # Ensure the valid_dirs array contains the expected directories
+    echo "Valid directories: ${valid_dirs[@]}"  # Final debug line showing valid directories
     echo "${valid_dirs[@]}"
 }
 
