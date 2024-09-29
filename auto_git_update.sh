@@ -1,5 +1,29 @@
 #!/usr/bin/env bash
 
+# Declare the security variable
+security_variable=2  # Change this value as needed (0, 1, or 2)
+
+# Check the value of the security variable
+if [ "$security_variable" -eq 0 ]; then
+    echo "Error: security_variable is set to 0. Exiting the script."
+    exit 1
+fi
+
+# If the security variable is 2, continue without any conditions
+if [ "$security_variable" -eq 2 ]; then
+    echo "security_variable is set to 2. Running the script without further checks."
+    # Continue with the rest of your script
+else
+    # If the security variable is 1, check if today is Friday
+    DAY_OF_WEEK=$(date +%A)
+    if [ "$DAY_OF_WEEK" = "Friday" ]; then
+        echo "Today is Friday. Continuing with the script."
+    else
+        echo "Error: Today is not Friday (Today is $DAY_OF_WEEK). Exiting the script."
+        exit 1
+    fi
+fi
+
 # Check if required commands are available
 for cmd in git nmcli msmtp ssh scp gh; do
     if ! command -v "$cmd" &>/dev/null; then
