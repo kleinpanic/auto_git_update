@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # Declare the security variable
-security_variable=2  # Change this value as needed (0, 1, or 2)
+security_variable=1  # Change this value as needed (0, 1, or 2)
 
 # Check the value of the security variable
 if [ "$security_variable" -eq 0 ]; then
@@ -18,8 +18,8 @@ else
     if [ "$DAY_OF_WEEK" = "Friday" ]; then
         echo "Today is Friday. Continuing with the script."
     else
-        echo "Error: Today is not Friday (Today is $DAY_OF_WEEK). Exiting the script."
-        exit 1
+        echo "Today is not Friday (Today is $DAY_OF_WEEK). Exiting the script."
+        exit 0
     fi
 fi
 
@@ -37,6 +37,7 @@ CREDENTIALS_FILE="$HOME/.config/setup/credentials.config"
 REPORT="/tmp/git_update_report.txt"  # Full detailed report
 SMS_REPORT="/tmp/git_update_sms.txt"  # Minimal SMS summary
 SMS_CHAR_LIMIT=160  # Character limit for SMS messages
+SSH_DIR="/home/klein/reports"
 
 # Check for the existence of the configuration file
 if [ ! -f "$TXT_FILE" ]; then
@@ -82,8 +83,9 @@ get_repo_dirs() {
     while IFS= read -r repo_dir; do
         # Trim whitespace and skip empty lines
         repo_dir=$(echo "$repo_dir" | xargs)
-        [ -z "$repo_dir" ] && continue
-        
+        if [[ -z "$repo_dir" || "$repo_dir" == \#* ]]; then
+            continue
+        fi
         # Check if the directory is valid and contains a .git folder
         if [ -d "$repo_dir" ] && [ -d "$repo_dir/.git" ]; then
             valid_dirs+=("$repo_dir")
@@ -104,8 +106,9 @@ create_github_repo() {
     # Use GitHub CLI to create the repo
     if gh repo create "$repo_name" --public --source="$repo_dir" --remote=origin --push; then
         echo "Successfully created GitHub repository #$repo_number: $repo_name" >> "$REPORT"
-        echo "Repo #$repo_number $repo_name: GHS (GitHub Repo Created Successfully)" >> "$SMS_REPORT"
-        
+        echo "Repo #$repo_number $repo_name: GHS" >> "$SMS_REPORT"
+        echo "Success GHS"
+
         # Check if the repository has existing commits
         if [ -d "$repo_dir/.git" ] && [ "$(git -C "$repo_dir" rev-parse HEAD)" ]; then
             echo "Repository #$repo_number has existing commits. Attempting to add remote and push." >> "$REPORT"
@@ -119,16 +122,19 @@ create_github_repo() {
             # Push to GitHub
             if git push -u origin main; then
                 echo "Existing repository #$repo_number pushed successfully to GitHub." >> "$REPORT"
-                echo "Repo #$repo_number $repo_name: Pushed Successfully" >> "$SMS_REPORT"
+                echo "Repo #$repo_number: PS" >> "$SMS_REPORT"
+                echo "Repo PS"
             else
                 echo "Failed to push the existing repository #$repo_number to GitHub." >> "$REPORT"
-                echo "Repo #$repo_number $repo_name: Push Failed" >> "$SMS_REPORT"
+                echo "Repo #$repo_number: PF" >> "$SMS_REPORT"
+                echo "Repo PF"
             fi
         fi
         return 0
     else
         echo "Failed to create GitHub repository #$repo_number: $repo_name" >> "$REPORT"
-        echo "Repo #$repo_number $repo_name: GCF (GitHub Repo Creation Failed)" >> "$SMS_REPORT"
+        echo "Repo #$repo_number: GCF" >> "$SMS_REPORT"
+        echo "GCF Repo"
         return 1
     fi
 }
@@ -212,6 +218,7 @@ update_repo() {
     # Validate .git folder before proceeding
     if ! is_valid_git_repo "$repo_dir"; then
         echo "Repo #$repo_number: Invalid .git folder, skipping..." >> "$SMS_REPORT"
+        echo "Invalid .git"
         return 1
     fi
 
@@ -229,6 +236,8 @@ update_repo() {
 
     if [ "$github_exists" = true ]; then
         if is_repo_up_to_date; then
+            echo "Repo #$repo_number: NC-GE" >> "$SMS_REPORT"
+            echo "NC-GE"
             return 0  # Exit the update function early since there's nothing to fetch
         else
             git fetch origin &>/dev/null  # Proceed with the fetch if not up-to-date
@@ -237,6 +246,7 @@ update_repo() {
         if ! git merge origin/main --no-commit --no-ff; then
             echo "Merge conflict detected in repo #$repo_number" >> "$REPORT"
             echo "Repo #$repo_number: MC" >> "$SMS_REPORT"
+            echo "MC"
             git merge --abort
             return 1
         fi
@@ -247,8 +257,10 @@ update_repo() {
         
         if [ "$github_exists" = false ]; then
             echo "Repo #$repo_number: NC-GDE" >> "$SMS_REPORT"
+            echo "NC-GDE"
         else
             echo "Repo #$repo_number: NC-GE" >> "$SMS_REPORT"
+            echo "NC-GE"
         fi
         
         return 0
@@ -260,6 +272,7 @@ update_repo() {
     if [ "$github_exists" = false ]; then
         echo "No GitHub repository available for repo #$repo_number. Committing locally..." >> "$REPORT"
         echo "Repo #$repo_number: lc-ngr" >> "$SMS_REPORT"
+        echo "lc-ngr"
         return 0
     fi
 
@@ -269,14 +282,17 @@ update_repo() {
         if ! git push origin main; then
             echo "Failed to push changes in repo #$repo_number" >> "$REPORT"
             echo "Repo #$repo_number: PF" >> "$SMS_REPORT"
+            echo "PF"
             return 1
         else
             echo "Changes pushed successfully in repo #$repo_number" >> "$REPORT"
             echo "Repo #$repo_number: P" >> "$SMS_REPORT"
+            echo "P"
         fi
     else
         echo "No internet connection. Changes committed locally in repo #$repo_number" >> "$REPORT"
         echo "Repo #$repo_number: LC" >> "$SMS_REPORT"
+        echo "LC"
     fi
 }
 
@@ -317,7 +333,9 @@ done
 # Check if the detailed SMS report exceeds the SMS character limit
 sms_detailed_content=$(cat "$SMS_REPORT")
 if [ "${#sms_detailed_content}" -gt "$SMS_CHAR_LIMIT" ]; then
-    sms_summary="Pushed: $pushed_count/$total_repos, No Change: $no_change_count/$total_repos, Locally Committed: $local_commit_count/$total_repos, Conflicts: $conflict_count/$total_repos, Errors: $error_count/$total_repos, No GitHub Repo: $no_github_repo_count/$total_repos, Created: $created_count/$total_repos"
+    DATE=$(date "+%Y-%m-%d %H:%M:%S")
+    echo "Concat output activated"
+    sms_summary="$DATE. Pushed: $pushed_count/$total_repos, No Change: $no_change_count/$total_repos, Locally Committed: $local_commit_count/$total_repos, Conflicts: $conflict_count/$total_repos, Errors: $error_count/$total_repos, No GitHub Repo: $no_github_repo_count/$total_repos, Created: $created_count/$total_repos"
     echo "$sms_summary" > "$SMS_REPORT"
 fi
 
@@ -333,8 +351,17 @@ EOF
 }
 
 copy_report_ssh() {
+    # Ensure SSH_DIR is defined
+    if [ -z "$SSH_DIR" ]; then
+        echo "Error: SSH_DIR is not set. Please define it in your script."
+        return 1
+    fi
+    
+    # Create the remote directory if it doesn't exist
     ssh "$SSH_HOST" "mkdir -p $SSH_DIR"
-    scp "$REPORT" "$SSH_HOST:$SSH_DIR/"
+    
+    # Transfer the report file to the specified directory
+    rsync -avz --progress "$REPORT" "$SSH_HOST:$SSH_DIR/"
     return $?
 }
 
