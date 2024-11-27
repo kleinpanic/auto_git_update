@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # Declare the security variable
-security_variable=1  # Change this value as needed (0, 1, or 2)
+security_variable=2  # Change this value as needed (0, 1, or 2)
 
 # Check the value of the security variable
 if [ "$security_variable" -eq 0 ]; then
