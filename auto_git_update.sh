@@ -221,21 +221,21 @@ update_repo() {
     local repo_dir="$1"
     local repo_number="$2"
 
-    # Change directory and log failure if unable.
+    # Change directory into the repository.
     if ! cd "$repo_dir"; then
         log_msg "Repo #$repo_number: Unable to cd to $repo_dir"
         return 1
     fi
     log_msg "Processing repository #$repo_number at $repo_dir"
 
-    # Validate the repository.
+    # Validate that this is a proper git repository.
     if ! is_valid_git_repo "$repo_dir"; then
         log_msg "Repo #$repo_number: Invalid repository. Skipping."
         echo "Invalid .git" >> "$SMS_REPORT"
         return 1
     fi
 
-    # If no commits exist, create an initial empty commit.
+    # If there are no commits, create an initial empty commit.
     if ! git rev-parse HEAD &>/dev/null; then
         log_msg "Repo #$repo_number: No commits found. Creating an initial empty commit."
         if ! git commit --allow-empty -m "Initial commit"; then
@@ -245,36 +245,40 @@ update_repo() {
         fi
     fi
 
-    # Check for a GitHub remote.
+    # Check if a GitHub remote exists.
     local remote_available=true
     if ! check_github_remote; then
-        log_msg "Repo #$repo_number: No valid GitHub remote found."
+        log_msg "Repo #$repo_number: No valid GitHub remote detected."
         remote_available=false
         if check_wifi; then
             local repo_name
             repo_name=$(basename "$repo_dir")
             log_msg "Repo #$repo_number: Attempting to add remote manually for $repo_name."
-            # Try adding the remote manually.
+            # First try to add the remote manually.
             git remote add origin "git@github.com:kleinpanic/$repo_name.git" 2>/dev/null || true
             if check_github_remote; then
                 remote_available=true
                 log_msg "Repo #$repo_number: Remote added manually."
             else
-                log_msg "Repo #$repo_number: Manual remote add did not work; attempting to create GitHub repo."
+                log_msg "Repo #$repo_number: Manual remote add failed; attempting to create GitHub repo."
                 create_github_repo "$repo_name" "$repo_dir" "$repo_number"
+                # After creation, try setting the remote URL explicitly.
+                git remote set-url origin "git@github.com:kleinpanic/$repo_name.git" 2>/dev/null || true
                 if check_github_remote; then
                     remote_available=true
                     log_msg "Repo #$repo_number: GitHub remote now exists after creation."
                 else
-                    log_msg "Repo #$repo_number: Failed to create GitHub remote."
+                    log_msg "Repo #$repo_number: Failed to create or add a GitHub remote."
                 fi
             fi
         else
             log_msg "Repo #$repo_number: No WiFi. Cannot add or create remote."
         fi
+    else
+        log_msg "Repo #$repo_number: Valid GitHub remote detected."
     fi
 
-    # Check for local changes.
+    # If no local changes exist, log and exit.
     if [ -z "$(git status --porcelain)" ]; then
         log_msg "Repo #$repo_number: No local changes detected."
         if [ "$remote_available" = false ]; then
@@ -286,11 +290,9 @@ update_repo() {
         return 0
     fi
 
-    # Stage all changes.
+    # Stage and commit local changes.
     log_msg "Repo #$repo_number: Staging all changes."
     git add -A
-
-    # Commit changes.
     if git -c commit.gpgSign=false commit -m "Automated update"; then
         log_msg "Repo #$repo_number: Local commit succeeded."
     else
@@ -299,7 +301,7 @@ update_repo() {
         return 0
     fi
 
-    # Pull with rebase if remote exists and WiFi is available.
+    # If a remote exists and WiFi is available, pull with rebase.
     if [ "$remote_available" = true ] && check_wifi; then
         log_msg "Repo #$repo_number: Attempting pull --rebase on branch 'main'."
         if timeout 60s git pull --rebase --no-edit origin main; then
@@ -316,7 +318,7 @@ update_repo() {
         log_msg "Repo #$repo_number: Skipping pull/rebase (no remote or no internet)."
     fi
 
-    # Push if remote exists and WiFi is available.
+    # If a remote exists and WiFi is available, push the changes.
     if [ "$remote_available" = true ] && check_wifi; then
         log_msg "Repo #$repo_number: Attempting push on branch 'main'."
         if timeout 60s git push origin main; then
@@ -328,7 +330,7 @@ update_repo() {
             push_output=$(timeout 60s git push origin main 2>&1) || push_exit=$?
             log_msg "Repo #$repo_number: Push failed with exit code ${push_exit:-0} and output: $push_output"
             echo "Repo #$repo_number: PF" >> "$SMS_REPORT"
-            # Fallback: Set the remote URL and try again.
+            # Fallback: Force-set the remote URL and try again.
             local repo_name
             repo_name=$(basename "$repo_dir")
             log_msg "Repo #$repo_number: Attempting fallback: setting remote URL to git@github.com:kleinpanic/$repo_name.git"
