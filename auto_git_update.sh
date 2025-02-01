@@ -333,10 +333,21 @@ update_repo() {
             echo "Repo #$repo_number: P" >> "$SMS_REPORT"
             echo "P"
         else
-            log_msg "Repo #$repo_number: Push timed out or failed."
-            echo "Repo #$repo_number: PF" >> "$SMS_REPORT"
-            echo "PF"
-            return 1
+            log_msg "Repo #$repo_number: Push failed. Attempting fallback remote add and push."
+            # Fallback: add remote if missing and try push again.
+            local repo_name
+            repo_name=$(basename "$repo_dir")
+            git remote add origin "git@github.com:kleinpanic/$repo_name.git" 2>/dev/null || true
+            if timeout 60s git push origin main; then
+                log_msg "Repo #$repo_number: Fallback push succeeded."
+                echo "Repo #$repo_number: P" >> "$SMS_REPORT"
+                echo "P"
+            else
+                log_msg "Repo #$repo_number: Fallback push failed."
+                echo "Repo #$repo_number: PF" >> "$SMS_REPORT"
+                echo "PF"
+                return 1
+            fi
         fi
     else
         log_msg "Repo #$repo_number: No internet; changes committed locally."
