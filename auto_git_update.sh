@@ -102,41 +102,45 @@ create_github_repo() {
     local repo_dir="$2"
     local repo_number="$3"
     echo "Attempting to create GitHub repo for repo $repo_number ($repo_name)" >> "$REPORT"
+    log_msg "Creating GitHub repository for repo $repo_number ($repo_name) using source: $repo_dir"
     
-    # Use GitHub CLI to create the repo
-    if gh repo create "$repo_name" --public --source="$repo_dir" --remote=origin --push; then
+    # Attempt to create the repository via gh.
+    # Capture the output and exit code.
+    local gh_output
+    if gh_output=$(gh repo create "$repo_name" --public --source="$repo_dir" --remote=origin --push 2>&1); then
         echo "Successfully created GitHub repository #$repo_number: $repo_name" >> "$REPORT"
         echo "Repo #$repo_number $repo_name: GHS" >> "$SMS_REPORT"
         echo "Success GHS"
-
-        # Check if the repository has existing commits
-        if [ -d "$repo_dir/.git" ] && [ "$(git -C "$repo_dir" rev-parse HEAD)" ]; then
-            echo "Repository #$repo_number has existing commits. Attempting to add remote and push." >> "$REPORT"
-            
-            # Add the GitHub remote if not already added
-            git remote add origin "git@github.com:kleinpanic/$repo_name.git" 2>/dev/null || true
-            
-            # Set the main branch if necessary
-            git branch -M main
-            
-            # Push to GitHub
-            if git push -u origin main; then
-                echo "Existing repository #$repo_number pushed successfully to GitHub." >> "$REPORT"
-                echo "Repo #$repo_number: PS" >> "$SMS_REPORT"
-                echo "Repo PS"
-            else
-                echo "Failed to push the existing repository #$repo_number to GitHub." >> "$REPORT"
-                echo "Repo #$repo_number: PF" >> "$SMS_REPORT"
-                echo "Repo PF"
-            fi
-        fi
-        return 0
+        log_msg "GitHub repository $repo_name created successfully."
     else
-        echo "Failed to create GitHub repository #$repo_number: $repo_name" >> "$REPORT"
-        echo "Repo #$repo_number: GCF" >> "$SMS_REPORT"
-        echo "GCF Repo"
-        return 1
+        # Check if the output indicates that the repository already exists.
+        if echo "$gh_output" | grep -qi "already exists"; then
+            echo "Repository $repo_name already exists on GitHub." >> "$REPORT"
+            log_msg "Repository $repo_name already exists on GitHub. Will attempt to add remote."
+        else
+            echo "Failed to create GitHub repository #$repo_number: $repo_name" >> "$REPORT"
+            echo "Repo #$repo_number: GCF" >> "$SMS_REPORT"
+            echo "GCF Repo"
+            log_msg "Failed to create GitHub repository $repo_name. gh output: $gh_output"
+            return 1
+        fi
     fi
+    
+    # In either case, try to set the remote URL.
+    git remote add origin "git@github.com:kleinpanic/$repo_name.git" 2>/dev/null || true
+    git branch -M main
+    if git push -u origin main; then
+        echo "Existing repository #$repo_number pushed successfully to GitHub." >> "$REPORT"
+        echo "Repo #$repo_number: PS" >> "$SMS_REPORT"
+        echo "Repo PS"
+        log_msg "Existing repository $repo_name pushed successfully."
+    else
+        echo "Failed to push the existing repository #$repo_number to GitHub." >> "$REPORT"
+        echo "Repo #$repo_number: PF" >> "$SMS_REPORT"
+        echo "Repo PF"
+        log_msg "Push failed for repository $repo_name."
+    fi
+    return 0
 }
 
 # Function to check if a remote GitHub origin exists
@@ -217,17 +221,31 @@ update_repo() {
     local repo_dir="$1"
     local repo_number="$2"
 
-    cd "$repo_dir" || return 1
+    # Change directory and log failure if unable.
+    if ! cd "$repo_dir"; then
+        log_msg "Repo #$repo_number: Unable to cd to $repo_dir"
+        return 1
+    fi
     log_msg "Processing repository #$repo_number at $repo_dir"
 
-    # Validate the .git folder.
+    # Validate the repository.
     if ! is_valid_git_repo "$repo_dir"; then
         log_msg "Repo #$repo_number: Invalid repository. Skipping."
         echo "Invalid .git" >> "$SMS_REPORT"
         return 1
     fi
 
-    # Check for GitHub remote; try creating if absent.
+    # If no commits exist, create an initial empty commit.
+    if ! git rev-parse HEAD &>/dev/null; then
+        log_msg "Repo #$repo_number: No commits found. Creating an initial empty commit."
+        if ! git commit --allow-empty -m "Initial commit"; then
+            log_msg "Repo #$repo_number: Failed to create initial commit."
+            echo "Repo #$repo_number: No commit" >> "$SMS_REPORT"
+            return 1
+        fi
+    fi
+
+    # Check for a GitHub remote.
     local remote_available=true
     if ! check_github_remote; then
         log_msg "Repo #$repo_number: No valid GitHub remote found."
@@ -235,19 +253,28 @@ update_repo() {
         if check_wifi; then
             local repo_name
             repo_name=$(basename "$repo_dir")
-            create_github_repo "$repo_name" "$repo_dir" "$repo_number"
-            # Recheck the remote
+            log_msg "Repo #$repo_number: Attempting to add remote manually for $repo_name."
+            # Try adding the remote manually.
+            git remote add origin "git@github.com:kleinpanic/$repo_name.git" 2>/dev/null || true
             if check_github_remote; then
                 remote_available=true
+                log_msg "Repo #$repo_number: Remote added manually."
             else
-                log_msg "Repo #$repo_number: Failed to create remote repository."
+                log_msg "Repo #$repo_number: Manual remote add did not work; attempting to create GitHub repo."
+                create_github_repo "$repo_name" "$repo_dir" "$repo_number"
+                if check_github_remote; then
+                    remote_available=true
+                    log_msg "Repo #$repo_number: GitHub remote now exists after creation."
+                else
+                    log_msg "Repo #$repo_number: Failed to create GitHub remote."
+                fi
             fi
         else
-            log_msg "Repo #$repo_number: No WiFi. Committing locally only."
+            log_msg "Repo #$repo_number: No WiFi. Cannot add or create remote."
         fi
     fi
 
-    # Check for any local changes (staged, unstaged, or untracked)
+    # Check for local changes.
     if [ -z "$(git status --porcelain)" ]; then
         log_msg "Repo #$repo_number: No local changes detected."
         if [ "$remote_available" = false ]; then
@@ -260,9 +287,10 @@ update_repo() {
     fi
 
     # Stage all changes.
+    log_msg "Repo #$repo_number: Staging all changes."
     git add -A
 
-    # Commit changes; override PGP signing requirement for automation.
+    # Commit changes.
     if git -c commit.gpgSign=false commit -m "Automated update"; then
         log_msg "Repo #$repo_number: Local commit succeeded."
     else
@@ -271,15 +299,15 @@ update_repo() {
         return 0
     fi
 
-    # If a remote exists and WiFi is available, perform a pull with rebase.
+    # Pull with rebase if remote exists and WiFi is available.
     if [ "$remote_available" = true ] && check_wifi; then
-        log_msg "Repo #$repo_number: Attempting pull --rebase."
-        # Use a timeout (60 seconds in this example) and --no-edit to avoid interactive prompts.
+        log_msg "Repo #$repo_number: Attempting pull --rebase on branch 'main'."
         if timeout 60s git pull --rebase --no-edit origin main; then
             log_msg "Repo #$repo_number: Rebase succeeded."
         else
-            log_msg "Repo #$repo_number: Rebase timed out or encountered conflicts; aborting rebase."
-            git rebase --abort
+            local pull_exit=$?
+            log_msg "Repo #$repo_number: Rebase failed with exit code $pull_exit; aborting rebase."
+            git rebase --abort || log_msg "Repo #$repo_number: Failed to abort rebase cleanly."
             echo "Repo #$repo_number: Rebase Conflict" >> "$SMS_REPORT"
             echo "MC"
             return 1
@@ -288,24 +316,43 @@ update_repo() {
         log_msg "Repo #$repo_number: Skipping pull/rebase (no remote or no internet)."
     fi
 
-    # Push changes if a remote is available and there is internet.
+    # Push if remote exists and WiFi is available.
     if [ "$remote_available" = true ] && check_wifi; then
-        log_msg "Repo #$repo_number: Attempting push."
+        log_msg "Repo #$repo_number: Attempting push on branch 'main'."
         if timeout 60s git push origin main; then
             log_msg "Repo #$repo_number: Push succeeded."
             echo "Repo #$repo_number: P" >> "$SMS_REPORT"
             echo "P"
         else
-            log_msg "Repo #$repo_number: Push timed out or failed."
+            local push_output push_exit
+            push_output=$(timeout 60s git push origin main 2>&1) || push_exit=$?
+            log_msg "Repo #$repo_number: Push failed with exit code ${push_exit:-0} and output: $push_output"
             echo "Repo #$repo_number: PF" >> "$SMS_REPORT"
-            echo "PF"
-            return 1
+            # Fallback: Set the remote URL and try again.
+            local repo_name
+            repo_name=$(basename "$repo_dir")
+            log_msg "Repo #$repo_number: Attempting fallback: setting remote URL to git@github.com:kleinpanic/$repo_name.git"
+            git remote set-url origin "git@github.com:kleinpanic/$repo_name.git" 2>&1 || true
+            local fallback_output fallback_exit
+            fallback_output=$(timeout 60s git push origin main 2>&1) || fallback_exit=$?
+            if [ "${fallback_exit:-0}" -eq 0 ]; then
+                log_msg "Repo #$repo_number: Fallback push succeeded."
+                echo "Repo #$repo_number: P" >> "$SMS_REPORT"
+                echo "P"
+            else
+                log_msg "Repo #$repo_number: Fallback push failed with exit code ${fallback_exit:-0} and output: $fallback_output"
+                echo "Repo #$repo_number: PF" >> "$SMS_REPORT"
+                echo "PF"
+                return 1
+            fi
         fi
     else
         log_msg "Repo #$repo_number: No internet; changes committed locally."
         echo "Repo #$repo_number: LC" >> "$SMS_REPORT"
         echo "LC"
     fi
+
+    return 0
 }
 
 # Start of the script
