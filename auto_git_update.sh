@@ -19,7 +19,7 @@ ensure_file "$LOGFILE" 600
 echo "Advanced logging initialized at ${LOGFILE}"
 
 #######################################
-# Configuration (Moved Up to Define REPORT Early)
+# Configuration (Define early so that REPORT is available)
 #######################################
 TXT_FILE="/home/klein/.config/setup/autogitupdate.txt"
 CREDENTIALS_FILE="$HOME/.config/setup/credentials.config"
@@ -28,27 +28,15 @@ SMS_REPORT="/tmp/git_update_sms.txt"  # Minimal SMS summary
 SMS_CHAR_LIMIT=160                   # Character limit for SMS messages
 SSH_DIR="/home/klein/reports"
 
-if [ ! -f "$TXT_FILE" ]; then
-    echo "Error: Configuration file '$TXT_FILE' not found. Exiting the script."
-    exit 1
-fi
-
-if [ ! -f "$CREDENTIALS_FILE" ]; then
-    echo "Error: Credentials file '$CREDENTIALS_FILE' not found. Exiting the script."
-    exit 1
-fi
-
-# Source the credentials.
-source "$CREDENTIALS_FILE"
-
-if [ -z "$EMAIL" ] || [ -z "$SSH_HOST" ] || [ -z "$PHONE_NUMBER" ]; then
-    echo "Error: Missing required credentials (EMAIL, SSH_HOST, or PHONE_NUMBER) in '$CREDENTIALS_FILE'. Exiting the script."
-    exit 1
-fi
-
 # Ensure the report files exist and have the correct permissions.
 ensure_file "$REPORT" 600
 ensure_file "$SMS_REPORT" 600
+
+#######################################
+# Error Trap Setup
+#######################################
+# This trap logs the line number and command that failed.
+trap 'echo "Error on line $LINENO: command \"$BASH_COMMAND\" exited with status $?" >> "$REPORT"' ERR
 
 #######################################
 # Helper Function for Logging
@@ -99,8 +87,35 @@ done
 log_msg "All dependencies found."
 
 #######################################
-# Helper Functions
+# Configuration File Checks
 #######################################
+echo "Loading configuration..."
+if [ ! -f "$TXT_FILE" ]; then
+    echo "Error: Configuration file '$TXT_FILE' not found. Exiting the script."
+    log_msg "Configuration file '$TXT_FILE' not found."
+    exit 1
+fi
+
+if [ ! -f "$CREDENTIALS_FILE" ]; then
+    echo "Error: Credentials file '$CREDENTIALS_FILE' not found. Exiting the script."
+    log_msg "Credentials file '$CREDENTIALS_FILE' not found."
+    exit 1
+fi
+
+# Source the credentials.
+source "$CREDENTIALS_FILE"
+log_msg "Credentials loaded from $CREDENTIALS_FILE."
+
+if [ -z "$EMAIL" ] || [ -z "$SSH_HOST" ] || [ -z "$PHONE_NUMBER" ]; then
+    echo "Error: Missing required credentials (EMAIL, SSH_HOST, or PHONE_NUMBER) in '$CREDENTIALS_FILE'. Exiting the script."
+    log_msg "Required credentials missing in $CREDENTIALS_FILE."
+    exit 1
+fi
+
+#######################################
+# Helper Functions (continued)
+#######################################
+
 check_wifi() {
     nmcli -t -f ACTIVE,SSID dev wifi | grep -q "^yes" && ping -c 1 8.8.8.8 &>/dev/null
     return $?
@@ -114,7 +129,7 @@ get_repo_dirs() {
         if [[ -z "$repo_dir" || "$repo_dir" == \#* ]]; then
             continue
         fi
-        # Add repository if the directory exists and contains a .git folder.
+        # Add repository if it exists and contains a .git folder.
         if [ -d "$repo_dir" ] && [ -d "$repo_dir/.git" ]; then
             valid_dirs+=("$repo_dir")
         fi
