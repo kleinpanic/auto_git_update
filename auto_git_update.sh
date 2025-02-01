@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-set -euo pipefail
+# Remove the -e flag so errors do not immediately terminate the script.
+set -uo pipefail
 IFS=$'\n\t'
 
 #######################################
@@ -14,8 +15,8 @@ ensure_file() {
     chmod "$permissions" "$file"
 }
 ensure_file "$LOGFILE" 600
-# (Optional) Uncomment the following line to redirect all output to LOGFILE as well:
-# exec > >(tee -a "$LOGFILE") 2>&1
+# Uncomment the next line if you want to redirect all output to LOGFILE as well:
+exec > >(tee -a "$LOGFILE") 2>&1
 echo "Advanced logging initialized at ${LOGFILE}"
 
 #######################################
@@ -33,9 +34,8 @@ ensure_file "$REPORT" 600
 ensure_file "$SMS_REPORT" 600
 
 #######################################
-# Error Trap Setup
+# Error Trap Setup (Logs error info before exiting)
 #######################################
-# This trap logs the line number and command that failed.
 trap 'echo "Error on line $LINENO: command \"$BASH_COMMAND\" exited with status $?" >> "$REPORT"' ERR
 
 #######################################
@@ -50,13 +50,11 @@ log_msg() {
 # Security Check
 #######################################
 security_variable=2  # Change this value as needed (0, 1, or 2)
-
 echo "Security variable is set to: $security_variable"
 if [ "$security_variable" -eq 0 ]; then
     echo "Error: security_variable is set to 0. Exiting the script."
     exit 1
 fi
-
 if [ "$security_variable" -eq 2 ]; then
     echo "security_variable is set to 2. Running the script without further checks."
     log_msg "Security check passed (security_variable=2)."
@@ -95,17 +93,13 @@ if [ ! -f "$TXT_FILE" ]; then
     log_msg "Configuration file '$TXT_FILE' not found."
     exit 1
 fi
-
 if [ ! -f "$CREDENTIALS_FILE" ]; then
     echo "Error: Credentials file '$CREDENTIALS_FILE' not found. Exiting the script."
     log_msg "Credentials file '$CREDENTIALS_FILE' not found."
     exit 1
 fi
-
-# Source the credentials.
 source "$CREDENTIALS_FILE"
 log_msg "Credentials loaded from $CREDENTIALS_FILE."
-
 if [ -z "$EMAIL" ] || [ -z "$SSH_HOST" ] || [ -z "$PHONE_NUMBER" ]; then
     echo "Error: Missing required credentials (EMAIL, SSH_HOST, or PHONE_NUMBER) in '$CREDENTIALS_FILE'. Exiting the script."
     log_msg "Required credentials missing in $CREDENTIALS_FILE."
@@ -113,9 +107,8 @@ if [ -z "$EMAIL" ] || [ -z "$SSH_HOST" ] || [ -z "$PHONE_NUMBER" ]; then
 fi
 
 #######################################
-# Helper Functions (continued)
+# Other Helper Functions
 #######################################
-
 check_wifi() {
     nmcli -t -f ACTIVE,SSID dev wifi | grep -q "^yes" && ping -c 1 8.8.8.8 &>/dev/null
     return $?
@@ -124,17 +117,14 @@ check_wifi() {
 get_repo_dirs() {
     local valid_dirs=()
     while IFS= read -r repo_dir; do
-        # Trim whitespace and skip empty or commented lines.
         repo_dir=$(echo "$repo_dir" | xargs)
         if [[ -z "$repo_dir" || "$repo_dir" == \#* ]]; then
             continue
         fi
-        # Add repository if it exists and contains a .git folder.
         if [ -d "$repo_dir" ] && [ -d "$repo_dir/.git" ]; then
             valid_dirs+=("$repo_dir")
         fi
     done < "$TXT_FILE"
-    # Output one repository per line.
     printf "%s\n" "${valid_dirs[@]}"
 }
 
@@ -241,25 +231,27 @@ is_valid_git_repo() {
     return 0
 }
 
+#######################################
+# Main Repository Update Function
+#######################################
 update_repo() {
     local repo_dir="$1"
     local repo_number="$2"
 
-    # Change directory and log failure if unable.
     if ! cd "$repo_dir"; then
         log_msg "Repo #$repo_number: Unable to cd to $repo_dir"
         return 1
     fi
     log_msg "Processing repository #$repo_number at $repo_dir"
 
-    # Validate the .git folder.
+    # Validate the repository.
     if ! is_valid_git_repo "$repo_dir"; then
         log_msg "Repo #$repo_number: Invalid repository. Skipping."
         echo "Invalid .git" >> "$SMS_REPORT"
         return 1
     fi
 
-    # If the repository has no commits, create an initial empty commit.
+    # If no commits exist, create an initial empty commit.
     if ! git rev-parse HEAD &>/dev/null; then
         log_msg "Repo #$repo_number: No commits found. Creating an initial empty commit."
         if ! git commit --allow-empty -m "Initial commit"; then
@@ -269,7 +261,7 @@ update_repo() {
         fi
     fi
 
-    # Check for GitHub remote; if missing, try to create one.
+    # Check for GitHub remote; if missing, attempt to create one.
     local remote_available=true
     if ! check_github_remote; then
         log_msg "Repo #$repo_number: No valid GitHub remote found."
@@ -302,11 +294,9 @@ update_repo() {
         return 0
     fi
 
-    # Stage all changes.
+    # Stage and commit changes.
     log_msg "Repo #$repo_number: Staging all changes."
     git add -A
-
-    # Commit changes.
     if git -c commit.gpgSign=false commit -m "Automated update"; then
         log_msg "Repo #$repo_number: Local commit succeeded."
     else
@@ -315,7 +305,7 @@ update_repo() {
         return 0
     fi
 
-    # Pull with rebase if remote exists and WiFi is available.
+    # Pull with rebase if a remote exists and WiFi is available.
     if [ "$remote_available" = true ] && check_wifi; then
         log_msg "Repo #$repo_number: Attempting pull --rebase on branch 'main'."
         if timeout 60s git pull --rebase --no-edit origin main; then
@@ -323,7 +313,7 @@ update_repo() {
         else
             local pull_exit=$?
             log_msg "Repo #$repo_number: Rebase failed with exit code $pull_exit; aborting rebase."
-            git rebase --abort || log_msg "Repo #$repo_number: Failed to abort rebase."
+            git rebase --abort || log_msg "Repo #$repo_number: Failed to abort rebase cleanly."
             echo "Repo #$repo_number: Rebase Conflict" >> "$SMS_REPORT"
             echo "MC"
             return 1
@@ -373,6 +363,9 @@ update_repo() {
     return 0
 }
 
+#######################################
+# Main Script Execution
+#######################################
 echo "Starting auto git update script on $(date)" > "$REPORT"
 echo "(G-R), $(date)" > "$SMS_REPORT"
 
@@ -392,7 +385,9 @@ repo_number=1
 for repo_dir in "${repo_dirs[@]}"; do
     echo "Updating repository #$repo_number: $repo_dir"
     log_msg "Starting update for repository #$repo_number: $repo_dir"
-    update_repo "$repo_dir" "$repo_number"
+    if ! update_repo "$repo_dir" "$repo_number"; then
+        log_msg "Error processing repository #$repo_number. Continuing with next repository."
+    fi
     case "$(tail -n 1 "$SMS_REPORT")" in
         *P) pushed_count=$((pushed_count + 1)) ;;
         *NC*) no_change_count=$((no_change_count + 1)) ;;
