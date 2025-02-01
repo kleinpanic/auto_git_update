@@ -245,10 +245,11 @@ update_repo() {
     local repo_dir="$1"
     local repo_number="$2"
 
-    # Set up a trap to log errors within this function.
-    trap 'log_msg "Error in update_repo() at line ${LINENO}: \"$BASH_COMMAND\" exited with status $?"' ERR
-
-    cd "$repo_dir" || { log_msg "Repo #$repo_number: Unable to cd to $repo_dir"; return 1; }
+    # Change directory and log failure if unable.
+    if ! cd "$repo_dir"; then
+        log_msg "Repo #$repo_number: Unable to cd to $repo_dir"
+        return 1
+    fi
     log_msg "Processing repository #$repo_number at $repo_dir"
 
     # Validate the .git folder.
@@ -305,7 +306,7 @@ update_repo() {
     log_msg "Repo #$repo_number: Staging all changes."
     git add -A
 
-    # Commit changes; override PGP signing requirement for automation.
+    # Commit changes.
     if git -c commit.gpgSign=false commit -m "Automated update"; then
         log_msg "Repo #$repo_number: Local commit succeeded."
     else
@@ -314,14 +315,15 @@ update_repo() {
         return 0
     fi
 
-    # Pull with rebase if a remote exists and WiFi is available.
+    # Pull with rebase if remote exists and WiFi is available.
     if [ "$remote_available" = true ] && check_wifi; then
         log_msg "Repo #$repo_number: Attempting pull --rebase on branch 'main'."
         if timeout 60s git pull --rebase --no-edit origin main; then
             log_msg "Repo #$repo_number: Rebase succeeded."
         else
-            log_msg "Repo #$repo_number: Rebase failed; aborting rebase."
-            git rebase --abort || log_msg "Repo #$repo_number: Failed to abort rebase cleanly."
+            local pull_exit=$?
+            log_msg "Repo #$repo_number: Rebase failed with exit code $pull_exit; aborting rebase."
+            git rebase --abort || log_msg "Repo #$repo_number: Failed to abort rebase."
             echo "Repo #$repo_number: Rebase Conflict" >> "$SMS_REPORT"
             echo "MC"
             return 1
@@ -338,24 +340,25 @@ update_repo() {
             echo "Repo #$repo_number: P" >> "$SMS_REPORT"
             echo "P"
         else
-            # Capture error output for push.
-            local push_output push_status
-            push_output=$(timeout 60s git push origin main 2>&1) || push_status=$?
-            log_msg "Repo #$repo_number: Push failed with error: $push_output"
+            local push_exit
+            local push_output
+            push_output=$(timeout 60s git push origin main 2>&1) || push_exit=$?
+            log_msg "Repo #$repo_number: Push failed with exit code ${push_exit:-0} and output: $push_output"
             echo "Repo #$repo_number: PF" >> "$SMS_REPORT"
-            # Fallback: set the remote URL and try again.
+            # Fallback: Set the remote URL and try again.
             local repo_name
             repo_name=$(basename "$repo_dir")
             log_msg "Repo #$repo_number: Attempting fallback: setting remote URL to git@github.com:kleinpanic/$repo_name.git"
             git remote set-url origin "git@github.com:kleinpanic/$repo_name.git" 2>&1 || true
-            local fallback_output fallback_status
-            fallback_output=$(timeout 60s git push origin main 2>&1) || fallback_status=$?
-            if [ "${fallback_status:-0}" -eq 0 ]; then
+            local fallback_exit
+            local fallback_output
+            fallback_output=$(timeout 60s git push origin main 2>&1) || fallback_exit=$?
+            if [ "${fallback_exit:-0}" -eq 0 ]; then
                 log_msg "Repo #$repo_number: Fallback push succeeded."
                 echo "Repo #$repo_number: P" >> "$SMS_REPORT"
                 echo "P"
             else
-                log_msg "Repo #$repo_number: Fallback push failed with error: $fallback_output"
+                log_msg "Repo #$repo_number: Fallback push failed with exit code ${fallback_exit:-0} and output: $fallback_output"
                 echo "Repo #$repo_number: PF" >> "$SMS_REPORT"
                 echo "PF"
                 return 1
@@ -366,8 +369,8 @@ update_repo() {
         echo "Repo #$repo_number: LC" >> "$SMS_REPORT"
         echo "LC"
     fi
-    # Clear the ERR trap for this function.
-    trap - ERR
+
+    return 0
 }
 
 echo "Starting auto git update script on $(date)" > "$REPORT"
