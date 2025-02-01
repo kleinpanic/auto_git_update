@@ -1,77 +1,106 @@
 #!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
 
-# Declare the security variable
-security_variable=2  # Change this value as needed (0, 1, or 2)
-
-# Check the value of the security variable
-if [ "$security_variable" -eq 0 ]; then
-    echo "Error: security_variable is set to 0. Exiting the script."
-    exit 1
-fi
-
-# If the security variable is 2, continue without any conditions
-if [ "$security_variable" -eq 2 ]; then
-    echo "security_variable is set to 2. Running the script without further checks."
-else
-    # If the security variable is 1, check if today is Friday
-    DAY_OF_WEEK=$(date +%A)
-    if [ "$DAY_OF_WEEK" = "Friday" ]; then
-        echo "Today is Friday. Continuing with the script."
-    else
-        echo "Today is not Friday (Today is $DAY_OF_WEEK). Exiting the script."
-        exit 0
-    fi
-fi
-
-# Check if required commands are available
-for cmd in git nmcli msmtp ssh scp gh; do
-    if ! command -v "$cmd" &>/dev/null; then
-        echo "$cmd is required but not installed. Exiting."
-        exit 1
-    fi
-done
-
-# Configuration
-TXT_FILE="/home/klein/.config/setup/autogitupdate.txt"
-CREDENTIALS_FILE="$HOME/.config/setup/credentials.config"
-REPORT="/tmp/git_update_report.txt"  # Full detailed report
-SMS_REPORT="/tmp/git_update_sms.txt"  # Minimal SMS summary
-SMS_CHAR_LIMIT=160  # Character limit for SMS messages
-SSH_DIR="/home/klein/reports"
-
-# Check for the existence of the configuration file
-if [ ! -f "$TXT_FILE" ]; then
-    echo "Error: Configuration file '$TXT_FILE' not found. Exiting the script."
-    exit 1
-fi
-
-# Check if the credentials file exists
-if [ ! -f "$CREDENTIALS_FILE" ]; then
-    echo "Error: Credentials file '$CREDENTIALS_FILE' not found. Exiting the script."
-    exit 1
-fi
-
-# Source the credentials from the config file
-source "$CREDENTIALS_FILE"
-
-# Validate that required variables are set
-if [ -z "$EMAIL" ] || [ -z "$SSH_HOST" ] || [ -z "$PHONE_NUMBER" ]; then
-    echo "Error: Missing required credentials (EMAIL, SSH_HOST, or PHONE_NUMBER) in '$CREDENTIALS_FILE'. Exiting the script."
-    exit 1
-fi
-
-# Ensure the report files exist and have the correct permissions
+#######################################
+# Advanced Logging Setup
+#######################################
+LOGFILE="/tmp/auto_git_update.log"
+# Ensure the advanced log file exists and has strict permissions.
 ensure_file() {
     local file="$1"
     local permissions="$2"
     [ ! -f "$file" ] && touch "$file" && chmod "$permissions" "$file"
     chmod "$permissions" "$file"
 }
+ensure_file "$LOGFILE" 600
+# (Optional) Uncomment the following line to redirect all output to LOGFILE as well:
+# exec > >(tee -a "$LOGFILE") 2>&1
+echo "Advanced logging initialized at ${LOGFILE}"
 
+#######################################
+# Configuration (Moved Up to Define REPORT Early)
+#######################################
+TXT_FILE="/home/klein/.config/setup/autogitupdate.txt"
+CREDENTIALS_FILE="$HOME/.config/setup/credentials.config"
+REPORT="/tmp/git_update_report.txt"  # Full detailed report
+SMS_REPORT="/tmp/git_update_sms.txt"  # Minimal SMS summary
+SMS_CHAR_LIMIT=160                   # Character limit for SMS messages
+SSH_DIR="/home/klein/reports"
+
+if [ ! -f "$TXT_FILE" ]; then
+    echo "Error: Configuration file '$TXT_FILE' not found. Exiting the script."
+    exit 1
+fi
+
+if [ ! -f "$CREDENTIALS_FILE" ]; then
+    echo "Error: Credentials file '$CREDENTIALS_FILE' not found. Exiting the script."
+    exit 1
+fi
+
+# Source the credentials.
+source "$CREDENTIALS_FILE"
+
+if [ -z "$EMAIL" ] || [ -z "$SSH_HOST" ] || [ -z "$PHONE_NUMBER" ]; then
+    echo "Error: Missing required credentials (EMAIL, SSH_HOST, or PHONE_NUMBER) in '$CREDENTIALS_FILE'. Exiting the script."
+    exit 1
+fi
+
+# Ensure the report files exist and have the correct permissions.
 ensure_file "$REPORT" 600
 ensure_file "$SMS_REPORT" 600
 
-# Function to check WiFi connection and internet availability
+#######################################
+# Helper Function for Logging
+#######################################
+log_msg() {
+    local msg="$1"
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $msg" >> "$REPORT"
+}
+
+#######################################
+# Security Check
+#######################################
+security_variable=2  # Change this value as needed (0, 1, or 2)
+
+echo "Security variable is set to: $security_variable"
+if [ "$security_variable" -eq 0 ]; then
+    echo "Error: security_variable is set to 0. Exiting the script."
+    exit 1
+fi
+
+if [ "$security_variable" -eq 2 ]; then
+    echo "security_variable is set to 2. Running the script without further checks."
+    log_msg "Security check passed (security_variable=2)."
+else
+    DAY_OF_WEEK=$(date +%A)
+    echo "Today is: $DAY_OF_WEEK"
+    if [ "$DAY_OF_WEEK" = "Friday" ]; then
+        echo "Today is Friday. Continuing with the script."
+        log_msg "Security check passed (Friday)."
+    else
+        echo "Today is not Friday (Today is $DAY_OF_WEEK). Exiting the script."
+        log_msg "Security check failed (not Friday). Exiting."
+        exit 0
+    fi
+fi
+
+#######################################
+# Dependency Checks
+#######################################
+echo "Checking dependencies..."
+for cmd in git nmcli msmtp ssh scp gh; do
+    if ! command -v "$cmd" &>/dev/null; then
+        echo "$cmd is required but not installed. Exiting."
+        log_msg "Dependency check failed: $cmd not found."
+        exit 1
+    fi
+done
+log_msg "All dependencies found."
+
+#######################################
+# Helper Functions
+#######################################
 check_wifi() {
     nmcli -t -f ACTIVE,SSID dev wifi | grep -q "^yes" && ping -c 1 8.8.8.8 &>/dev/null
     return $?
@@ -79,55 +108,47 @@ check_wifi() {
 
 get_repo_dirs() {
     local valid_dirs=()
-    
     while IFS= read -r repo_dir; do
-        # Trim whitespace and skip empty lines
+        # Trim whitespace and skip empty or commented lines.
         repo_dir=$(echo "$repo_dir" | xargs)
         if [[ -z "$repo_dir" || "$repo_dir" == \#* ]]; then
             continue
         fi
-        # Check if the directory is valid and contains a .git folder
+        # Add repository if the directory exists and contains a .git folder.
         if [ -d "$repo_dir" ] && [ -d "$repo_dir/.git" ]; then
             valid_dirs+=("$repo_dir")
         fi
     done < "$TXT_FILE"
-    
-    # Output only the valid directories without any additional text
-    echo "${valid_dirs[@]}"
+    # Output one repository per line.
+    printf "%s\n" "${valid_dirs[@]}"
 }
 
-# Function to create GitHub repo if it doesn't exist and push changes
 create_github_repo() {
     local repo_name="$1"
     local repo_dir="$2"
     local repo_number="$3"
     echo "Attempting to create GitHub repo for repo $repo_number ($repo_name)" >> "$REPORT"
-    
-    # Use GitHub CLI to create the repo
+    log_msg "Creating GitHub repository for repo $repo_number ($repo_name) using source: $repo_dir"
     if gh repo create "$repo_name" --public --source="$repo_dir" --remote=origin --push; then
         echo "Successfully created GitHub repository #$repo_number: $repo_name" >> "$REPORT"
         echo "Repo #$repo_number $repo_name: GHS" >> "$SMS_REPORT"
         echo "Success GHS"
-
-        # Check if the repository has existing commits
+        log_msg "GitHub repository $repo_name created successfully."
         if [ -d "$repo_dir/.git" ] && [ "$(git -C "$repo_dir" rev-parse HEAD)" ]; then
             echo "Repository #$repo_number has existing commits. Attempting to add remote and push." >> "$REPORT"
-            
-            # Add the GitHub remote if not already added
+            log_msg "Repository $repo_name has commits; adding remote and pushing."
             git remote add origin "git@github.com:kleinpanic/$repo_name.git" 2>/dev/null || true
-            
-            # Set the main branch if necessary
             git branch -M main
-            
-            # Push to GitHub
             if git push -u origin main; then
                 echo "Existing repository #$repo_number pushed successfully to GitHub." >> "$REPORT"
                 echo "Repo #$repo_number: PS" >> "$SMS_REPORT"
                 echo "Repo PS"
+                log_msg "Existing repository $repo_name pushed successfully."
             else
                 echo "Failed to push the existing repository #$repo_number to GitHub." >> "$REPORT"
                 echo "Repo #$repo_number: PF" >> "$SMS_REPORT"
                 echo "Repo PF"
+                log_msg "Push failed for repository $repo_name."
             fi
         fi
         return 0
@@ -135,42 +156,42 @@ create_github_repo() {
         echo "Failed to create GitHub repository #$repo_number: $repo_name" >> "$REPORT"
         echo "Repo #$repo_number: GCF" >> "$SMS_REPORT"
         echo "GCF Repo"
+        log_msg "Failed to create GitHub repository $repo_name."
         return 1
     fi
 }
 
-# Function to check if a remote GitHub origin exists
 check_github_remote() {
+    echo "Checking for GitHub remote..."
     if ! git remote get-url origin &>/dev/null; then
         echo "No 'origin' remote found." >> "$REPORT"
+        log_msg "No 'origin' remote found."
         return 1
     fi
-    
     local remote_url
     remote_url=$(git remote get-url origin)
     if [[ "$remote_url" != *github.com* ]]; then
         echo "'origin' remote does not point to GitHub." >> "$REPORT"
+        log_msg "'origin' remote does not point to GitHub: $remote_url"
         return 1
     fi
-    
-    local repo_name
+    local repo_name repo_owner full_repo_name
     repo_name=$(basename "$remote_url" .git)
-    local repo_owner
     repo_owner=$(basename "$(dirname "$remote_url")")
-    local full_repo_name="$repo_owner/$repo_name"
-    
+    full_repo_name="$repo_owner/$repo_name"
     echo "Checking if GitHub repository '$full_repo_name' exists..." >> "$REPORT"
-    
+    log_msg "Verifying existence of GitHub repository: $full_repo_name"
     if ! gh repo view "$full_repo_name" &>/dev/null; then
         echo "GitHub repository '$full_repo_name' does not exist or is not accessible." >> "$REPORT"
+        log_msg "GitHub repository $full_repo_name not accessible."
         return 1
     fi
-    
+    log_msg "GitHub remote check passed: $full_repo_name exists."
     return 0
 }
 
-# Function to check if the repository is up-to-date
 is_repo_up_to_date() {
+    echo "Updating remote information..."
     git remote update &>/dev/null
     if git status -uno | grep -q "Your branch is up to date"; then
         echo "Repository is up to date. No fetch needed."
@@ -181,43 +202,35 @@ is_repo_up_to_date() {
     fi
 }
 
-# Function to check if the .git folder is valid
 is_valid_git_repo() {
     local repo_dir="$1"
-    
+    echo "Validating repository: $repo_dir"
     if [ ! -d "$repo_dir/.git" ]; then
         echo "Error: '.git' directory is missing in '$repo_dir'. Skipping this repository." >> "$REPORT"
+        log_msg "Validation failed: .git directory missing in $repo_dir."
         return 1
     fi
-
-    # Check for essential .git files
     for file in HEAD config; do
         if [ ! -f "$repo_dir/.git/$file" ]; then
             echo "Error: Missing '$file' in '.git' directory of '$repo_dir'. Skipping this repository." >> "$REPORT"
+            log_msg "Validation failed: $file missing in $repo_dir/.git."
             return 1
         fi
     done
-
-    # Ensure the repository has at least one commit
     if ! git -C "$repo_dir" rev-parse HEAD &>/dev/null; then
         echo "Error: The repository in '$repo_dir' appears to be corrupt or does not have any commits." >> "$REPORT"
+        log_msg "Validation failed: repository $repo_dir has no commits."
         return 1
     fi
-
+    log_msg "Repository $repo_dir validated successfully."
     return 0
-}
-
-# A simple logging function to write timestamped messages
-log_msg() {
-    local msg="$1"
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - $msg" >> "$REPORT"
 }
 
 update_repo() {
     local repo_dir="$1"
     local repo_number="$2"
 
-    cd "$repo_dir" || return 1
+    cd "$repo_dir" || { log_msg "Repo #$repo_number: Unable to cd to $repo_dir"; return 1; }
     log_msg "Processing repository #$repo_number at $repo_dir"
 
     # Validate the .git folder.
@@ -227,7 +240,17 @@ update_repo() {
         return 1
     fi
 
-    # Check for GitHub remote; try creating if absent.
+    # If the repository has no commits, create an initial empty commit.
+    if ! git rev-parse HEAD &>/dev/null; then
+        log_msg "Repo #$repo_number: No commits found. Creating an initial empty commit."
+        if ! git commit --allow-empty -m "Initial commit" ; then
+            log_msg "Repo #$repo_number: Failed to create initial commit."
+            echo "Repo #$repo_number: No commit" >> "$SMS_REPORT"
+            return 1
+        fi
+    fi
+
+    # Check for GitHub remote; if missing, try to create one.
     local remote_available=true
     if ! check_github_remote; then
         log_msg "Repo #$repo_number: No valid GitHub remote found."
@@ -235,19 +258,20 @@ update_repo() {
         if check_wifi; then
             local repo_name
             repo_name=$(basename "$repo_dir")
+            log_msg "Repo #$repo_number: Attempting to create GitHub remote for $repo_name."
             create_github_repo "$repo_name" "$repo_dir" "$repo_number"
-            # Recheck the remote
             if check_github_remote; then
                 remote_available=true
+                log_msg "Repo #$repo_number: GitHub remote now exists."
             else
-                log_msg "Repo #$repo_number: Failed to create remote repository."
+                log_msg "Repo #$repo_number: Failed to create GitHub remote."
             fi
         else
             log_msg "Repo #$repo_number: No WiFi. Committing locally only."
         fi
     fi
 
-    # Check for any local changes (staged, unstaged, or untracked)
+    # Check for local changes.
     if [ -z "$(git status --porcelain)" ]; then
         log_msg "Repo #$repo_number: No local changes detected."
         if [ "$remote_available" = false ]; then
@@ -260,9 +284,8 @@ update_repo() {
     fi
 
     # Stage all changes.
+    log_msg "Repo #$repo_number: Staging all changes."
     git add -A
-
-    # Commit changes; override PGP signing requirement for automation.
     if git -c commit.gpgSign=false commit -m "Automated update"; then
         log_msg "Repo #$repo_number: Local commit succeeded."
     else
@@ -271,10 +294,9 @@ update_repo() {
         return 0
     fi
 
-    # If a remote exists and WiFi is available, perform a pull with rebase.
+    # Pull with rebase if a remote exists and WiFi is available.
     if [ "$remote_available" = true ] && check_wifi; then
-        log_msg "Repo #$repo_number: Attempting pull --rebase."
-        # Use a timeout (60 seconds in this example) and --no-edit to avoid interactive prompts.
+        log_msg "Repo #$repo_number: Attempting pull --rebase on branch 'main'."
         if timeout 60s git pull --rebase --no-edit origin main; then
             log_msg "Repo #$repo_number: Rebase succeeded."
         else
@@ -288,9 +310,9 @@ update_repo() {
         log_msg "Repo #$repo_number: Skipping pull/rebase (no remote or no internet)."
     fi
 
-    # Push changes if a remote is available and there is internet.
+    # Push if remote exists and WiFi is available.
     if [ "$remote_available" = true ] && check_wifi; then
-        log_msg "Repo #$repo_number: Attempting push."
+        log_msg "Repo #$repo_number: Attempting push on branch 'main'."
         if timeout 60s git push origin main; then
             log_msg "Repo #$repo_number: Push succeeded."
             echo "Repo #$repo_number: P" >> "$SMS_REPORT"
@@ -308,14 +330,12 @@ update_repo() {
     fi
 }
 
-# Start of the script
 echo "Starting auto git update script on $(date)" > "$REPORT"
 echo "(G-R), $(date)" > "$SMS_REPORT"
 
-# Fetch valid repositories
-repo_dirs=($(get_repo_dirs))
-
-# Counters for SMS summary report
+# Read repository directories safely into an array (one repo per line)
+mapfile -t repo_dirs < <(get_repo_dirs)
+log_msg "Total repositories found: ${#repo_dirs[@]}"
 pushed_count=0
 no_change_count=0
 local_commit_count=0
@@ -325,10 +345,10 @@ created_count=0
 no_github_repo_count=0
 total_repos=${#repo_dirs[@]}
 
-# Loop through each valid directory
 repo_number=1
 for repo_dir in "${repo_dirs[@]}"; do
     echo "Updating repository #$repo_number: $repo_dir"
+    log_msg "Starting update for repository #$repo_number: $repo_dir"
     update_repo "$repo_dir" "$repo_number"
     case "$(tail -n 1 "$SMS_REPORT")" in
         *P) pushed_count=$((pushed_count + 1)) ;;
@@ -342,13 +362,13 @@ for repo_dir in "${repo_dirs[@]}"; do
     repo_number=$((repo_number + 1))
 done
 
-# Check if the detailed SMS report exceeds the SMS character limit
 sms_detailed_content=$(cat "$SMS_REPORT")
 if [ "${#sms_detailed_content}" -gt "$SMS_CHAR_LIMIT" ]; then
     DATE=$(date "+%Y-%m-%d %H:%M:%S")
     echo "Concat output activated"
     sms_summary="$DATE. Pushed: $pushed_count/$total_repos, No Change: $no_change_count/$total_repos, Locally Committed: $local_commit_count/$total_repos, Conflicts: $conflict_count/$total_repos, Errors: $error_count/$total_repos, No GitHub Repo: $no_github_repo_count/$total_repos, Created: $created_count/$total_repos"
     echo "$sms_summary" > "$SMS_REPORT"
+    log_msg "SMS summary generated: $sms_summary"
 fi
 
 send_text() {
@@ -363,30 +383,29 @@ EOF
 }
 
 copy_report_ssh() {
-    # Ensure SSH_DIR is defined
     if [ -z "$SSH_DIR" ]; then
         echo "Error: SSH_DIR is not set. Please define it in your script."
         return 1
     fi
-    
-    # Create the remote directory if it doesn't exist
     ssh "$SSH_HOST" "mkdir -p $SSH_DIR"
-    
-    # Transfer the report file to the specified directory
     rsync -avz --progress "$REPORT" "$SSH_HOST:$SSH_DIR/"
     return $?
 }
 
 if check_wifi; then
     echo "WiFi is connected. Attempting to send text message and SSH transfer..."
+    log_msg "WiFi available. Sending SMS and transferring report via SSH."
     send_text && echo "Text message sent successfully." || echo "Failed to send text message."
-    
     if copy_report_ssh; then
         echo "SSH transfer succeeded."
+        log_msg "SSH transfer succeeded."
         rm -f "$REPORT"
     else
         echo "SSH transfer failed. Keeping local reports for troubleshooting."
+        log_msg "SSH transfer failed."
     fi
 else
     echo "No WiFi connection detected. Changes committed locally."
+    log_msg "No WiFi connection detected."
 fi
+
