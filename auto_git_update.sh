@@ -134,36 +134,44 @@ create_github_repo() {
     local repo_number="$3"
     echo "Attempting to create GitHub repo for repo $repo_number ($repo_name)" >> "$REPORT"
     log_msg "Creating GitHub repository for repo $repo_number ($repo_name) using source: $repo_dir"
-    if gh repo create "$repo_name" --public --source="$repo_dir" --remote=origin --push; then
+    
+    # Attempt to create the repository via gh.
+    # Capture the output and exit code.
+    local gh_output
+    if gh_output=$(gh repo create "$repo_name" --public --source="$repo_dir" --remote=origin --push 2>&1); then
         echo "Successfully created GitHub repository #$repo_number: $repo_name" >> "$REPORT"
         echo "Repo #$repo_number $repo_name: GHS" >> "$SMS_REPORT"
         echo "Success GHS"
         log_msg "GitHub repository $repo_name created successfully."
-        if [ -d "$repo_dir/.git" ] && [ "$(git -C "$repo_dir" rev-parse HEAD)" ]; then
-            echo "Repository #$repo_number has existing commits. Attempting to add remote and push." >> "$REPORT"
-            log_msg "Repository $repo_name has commits; adding remote and pushing."
-            git remote add origin "git@github.com:kleinpanic/$repo_name.git" 2>/dev/null || true
-            git branch -M main
-            if git push -u origin main; then
-                echo "Existing repository #$repo_number pushed successfully to GitHub." >> "$REPORT"
-                echo "Repo #$repo_number: PS" >> "$SMS_REPORT"
-                echo "Repo PS"
-                log_msg "Existing repository $repo_name pushed successfully."
-            else
-                echo "Failed to push the existing repository #$repo_number to GitHub." >> "$REPORT"
-                echo "Repo #$repo_number: PF" >> "$SMS_REPORT"
-                echo "Repo PF"
-                log_msg "Push failed for repository $repo_name."
-            fi
-        fi
-        return 0
     else
-        echo "Failed to create GitHub repository #$repo_number: $repo_name" >> "$REPORT"
-        echo "Repo #$repo_number: GCF" >> "$SMS_REPORT"
-        echo "GCF Repo"
-        log_msg "Failed to create GitHub repository $repo_name."
-        return 1
+        # Check if the output indicates that the repository already exists.
+        if echo "$gh_output" | grep -qi "already exists"; then
+            echo "Repository $repo_name already exists on GitHub." >> "$REPORT"
+            log_msg "Repository $repo_name already exists on GitHub. Will attempt to add remote."
+        else
+            echo "Failed to create GitHub repository #$repo_number: $repo_name" >> "$REPORT"
+            echo "Repo #$repo_number: GCF" >> "$SMS_REPORT"
+            echo "GCF Repo"
+            log_msg "Failed to create GitHub repository $repo_name. gh output: $gh_output"
+            return 1
+        fi
     fi
+    
+    # In either case, try to set the remote URL.
+    git remote add origin "git@github.com:kleinpanic/$repo_name.git" 2>/dev/null || true
+    git branch -M main
+    if git push -u origin main; then
+        echo "Existing repository #$repo_number pushed successfully to GitHub." >> "$REPORT"
+        echo "Repo #$repo_number: PS" >> "$SMS_REPORT"
+        echo "Repo PS"
+        log_msg "Existing repository $repo_name pushed successfully."
+    else
+        echo "Failed to push the existing repository #$repo_number to GitHub." >> "$REPORT"
+        echo "Repo #$repo_number: PF" >> "$SMS_REPORT"
+        echo "Repo PF"
+        log_msg "Push failed for repository $repo_name."
+    fi
+    return 0
 }
 
 check_github_remote() {
@@ -273,7 +281,6 @@ update_repo() {
             log_msg "Repo #$repo_number: Attempting to add remote manually for $repo_name."
             # Try adding the remote manually.
             git remote add origin "git@github.com:kleinpanic/$repo_name.git" 2>/dev/null || true
-            # Check again if the remote now exists.
             if check_github_remote; then
                 remote_available=true
                 log_msg "Repo #$repo_number: Remote added manually."
@@ -288,11 +295,13 @@ update_repo() {
                 fi
             fi
         else
-            log_msg "Repo #$repo_number: No WiFi. Cannot create or add remote."
+            log_msg "Repo #$repo_number: No WiFi. Cannot add or create remote."
         fi
+    else
+        log_msg "Repo #$repo_number: Valid GitHub remote exists."
     fi
 
-    # If no local changes, log and return.
+    # If no local changes exist, log and exit.
     if [ -z "$(git status --porcelain)" ]; then
         log_msg "Repo #$repo_number: No local changes detected."
         if [ "$remote_available" = false ]; then
@@ -304,9 +313,11 @@ update_repo() {
         return 0
     fi
 
-    # Stage and commit local changes.
+    # Stage all changes.
     log_msg "Repo #$repo_number: Staging all changes."
     git add -A
+
+    # Commit changes.
     if git -c commit.gpgSign=false commit -m "Automated update"; then
         log_msg "Repo #$repo_number: Local commit succeeded."
     else
@@ -332,7 +343,7 @@ update_repo() {
         log_msg "Repo #$repo_number: Skipping pull/rebase (no remote or no internet)."
     fi
 
-    # Push if remote exists and WiFi is available.
+    # Push changes if remote exists and WiFi is available.
     if [ "$remote_available" = true ] && check_wifi; then
         log_msg "Repo #$repo_number: Attempting push on branch 'main'."
         if timeout 60s git push origin main; then
