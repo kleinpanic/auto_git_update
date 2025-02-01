@@ -207,90 +207,102 @@ is_valid_git_repo() {
     return 0
 }
 
-# Function to update, commit, and push the changes
+# A simple logging function to write timestamped messages
+log_msg() {
+    local msg="$1"
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $msg" >> "$REPORT"
+}
+
 update_repo() {
     local repo_dir="$1"
     local repo_number="$2"
+
     cd "$repo_dir" || return 1
+    log_msg "Processing repository #$repo_number at $repo_dir"
 
-    echo "Processing repository #$repo_number located at $repo_dir" >> "$REPORT"
-
-    # Validate .git folder before proceeding
+    # Validate the .git folder.
     if ! is_valid_git_repo "$repo_dir"; then
-        echo "Repo #$repo_number: Invalid .git folder, skipping..." >> "$SMS_REPORT"
-        echo "Invalid .git"
+        log_msg "Repo #$repo_number: Invalid repository. Skipping."
+        echo "Invalid .git" >> "$SMS_REPORT"
         return 1
     fi
 
-    local github_exists=true
+    # Check for GitHub remote; try creating if absent.
+    local remote_available=true
     if ! check_github_remote; then
-        echo "No valid GitHub repository found for repo #$repo_number." >> "$REPORT"
-        github_exists=false
-        
+        log_msg "Repo #$repo_number: No valid GitHub remote found."
+        remote_available=false
         if check_wifi; then
+            local repo_name
             repo_name=$(basename "$repo_dir")
             create_github_repo "$repo_name" "$repo_dir" "$repo_number"
-            github_exists=true
+            # Recheck the remote
+            if check_github_remote; then
+                remote_available=true
+            else
+                log_msg "Repo #$repo_number: Failed to create remote repository."
+            fi
+        else
+            log_msg "Repo #$repo_number: No WiFi. Committing locally only."
         fi
     fi
 
-    if [ "$github_exists" = true ]; then
-        if is_repo_up_to_date; then
-            echo "Repo #$repo_number: NC-GE" >> "$SMS_REPORT"
-            echo "NC-GE"
-            return 0  # Exit the update function early since there's nothing to fetch
+    # Check for any local changes (staged, unstaged, or untracked)
+    if [ -z "$(git status --porcelain)" ]; then
+        log_msg "Repo #$repo_number: No local changes detected."
+        if [ "$remote_available" = false ]; then
+            echo "Repo #$repo_number: NC-GDE" >> "$SMS_REPORT"
         else
-            git fetch origin &>/dev/null  # Proceed with the fetch if not up-to-date
+            echo "Repo #$repo_number: NC-GE" >> "$SMS_REPORT"
         fi
-        
-        if ! git merge origin/main --no-commit --no-ff; then
-            echo "Merge conflict detected in repo #$repo_number" >> "$REPORT"
-            echo "Repo #$repo_number: MC" >> "$SMS_REPORT"
+        echo "NC-GE"
+        return 0
+    fi
+
+    # Stage all changes.
+    git add -A
+
+    # Commit changes; override PGP signing requirement for automation.
+    if git -c commit.gpgSign=false commit -m "Automated update"; then
+        log_msg "Repo #$repo_number: Local commit succeeded."
+    else
+        log_msg "Repo #$repo_number: Commit failed (perhaps nothing to commit)."
+        echo "Repo #$repo_number: No commit" >> "$SMS_REPORT"
+        return 0
+    fi
+
+    # If a remote exists and WiFi is available, perform a pull with rebase.
+    if [ "$remote_available" = true ] && check_wifi; then
+        log_msg "Repo #$repo_number: Attempting pull --rebase."
+        # Use a timeout (60 seconds in this example) and --no-edit to avoid interactive prompts.
+        if timeout 60s git pull --rebase --no-edit origin main; then
+            log_msg "Repo #$repo_number: Rebase succeeded."
+        else
+            log_msg "Repo #$repo_number: Rebase timed out or encountered conflicts; aborting rebase."
+            git rebase --abort
+            echo "Repo #$repo_number: Rebase Conflict" >> "$SMS_REPORT"
             echo "MC"
-            git merge --abort
             return 1
         fi
+    else
+        log_msg "Repo #$repo_number: Skipping pull/rebase (no remote or no internet)."
     fi
 
-    if git diff-index --quiet HEAD --; then
-        echo "No changes detected in repo #$repo_number" >> "$REPORT"
-        
-        if [ "$github_exists" = false ]; then
-            echo "Repo #$repo_number: NC-GDE" >> "$SMS_REPORT"
-            echo "NC-GDE"
+    # Push changes if a remote is available and there is internet.
+    if [ "$remote_available" = true ] && check_wifi; then
+        log_msg "Repo #$repo_number: Attempting push."
+        if timeout 60s git push origin main; then
+            log_msg "Repo #$repo_number: Push succeeded."
+            echo "Repo #$repo_number: P" >> "$SMS_REPORT"
+            echo "P"
         else
-            echo "Repo #$repo_number: NC-GE" >> "$SMS_REPORT"
-            echo "NC-GE"
-        fi
-        
-        return 0
-    fi
-
-    git add -A
-    git commit -m "Automated update"
-
-    if [ "$github_exists" = false ]; then
-        echo "No GitHub repository available for repo #$repo_number. Committing locally..." >> "$REPORT"
-        echo "Repo #$repo_number: lc-ngr" >> "$SMS_REPORT"
-        echo "lc-ngr"
-        return 0
-    fi
-
-    if check_wifi; then
-        echo "Internet is available. Attempting to push changes for repo #$repo_number..." >> "$REPORT"
-        
-        if ! git push origin main; then
-            echo "Failed to push changes in repo #$repo_number" >> "$REPORT"
+            log_msg "Repo #$repo_number: Push timed out or failed."
             echo "Repo #$repo_number: PF" >> "$SMS_REPORT"
             echo "PF"
             return 1
-        else
-            echo "Changes pushed successfully in repo #$repo_number" >> "$REPORT"
-            echo "Repo #$repo_number: P" >> "$SMS_REPORT"
-            echo "P"
         fi
     else
-        echo "No internet connection. Changes committed locally in repo #$repo_number" >> "$REPORT"
+        log_msg "Repo #$repo_number: No internet; changes committed locally."
         echo "Repo #$repo_number: LC" >> "$SMS_REPORT"
         echo "LC"
     fi
