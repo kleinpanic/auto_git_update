@@ -245,7 +245,9 @@ update_repo() {
     local repo_dir="$1"
     local repo_number="$2"
 
-    # Change to the repository directory.
+    # Set up a trap to log errors within this function.
+    trap 'log_msg "Error in update_repo() at line ${LINENO}: \"$BASH_COMMAND\" exited with status $?"' ERR
+
     cd "$repo_dir" || { log_msg "Repo #$repo_number: Unable to cd to $repo_dir"; return 1; }
     log_msg "Processing repository #$repo_number at $repo_dir"
 
@@ -276,7 +278,6 @@ update_repo() {
             repo_name=$(basename "$repo_dir")
             log_msg "Repo #$repo_number: Attempting to create GitHub remote for $repo_name."
             create_github_repo "$repo_name" "$repo_dir" "$repo_number"
-            # Recheck the remote after attempting creation.
             if check_github_remote; then
                 remote_available=true
                 log_msg "Repo #$repo_number: GitHub remote now exists."
@@ -304,7 +305,7 @@ update_repo() {
     log_msg "Repo #$repo_number: Staging all changes."
     git add -A
 
-    # Commit changes; override PGP signing for automation.
+    # Commit changes; override PGP signing requirement for automation.
     if git -c commit.gpgSign=false commit -m "Automated update"; then
         log_msg "Repo #$repo_number: Local commit succeeded."
     else
@@ -313,14 +314,14 @@ update_repo() {
         return 0
     fi
 
-    # Pull with rebase if remote exists and WiFi is available.
+    # Pull with rebase if a remote exists and WiFi is available.
     if [ "$remote_available" = true ] && check_wifi; then
         log_msg "Repo #$repo_number: Attempting pull --rebase on branch 'main'."
         if timeout 60s git pull --rebase --no-edit origin main; then
             log_msg "Repo #$repo_number: Rebase succeeded."
         else
-            log_msg "Repo #$repo_number: Rebase timed out or encountered conflicts; aborting rebase."
-            git rebase --abort
+            log_msg "Repo #$repo_number: Rebase failed; aborting rebase."
+            git rebase --abort || log_msg "Repo #$repo_number: Failed to abort rebase cleanly."
             echo "Repo #$repo_number: Rebase Conflict" >> "$SMS_REPORT"
             echo "MC"
             return 1
@@ -332,18 +333,17 @@ update_repo() {
     # Push if remote exists and WiFi is available.
     if [ "$remote_available" = true ] && check_wifi; then
         log_msg "Repo #$repo_number: Attempting push on branch 'main'."
-        # Try the initial push.
         if timeout 60s git push origin main; then
             log_msg "Repo #$repo_number: Push succeeded."
             echo "Repo #$repo_number: P" >> "$SMS_REPORT"
             echo "P"
         else
-            # Capture error output.
+            # Capture error output for push.
             local push_output push_status
             push_output=$(timeout 60s git push origin main 2>&1) || push_status=$?
             log_msg "Repo #$repo_number: Push failed with error: $push_output"
             echo "Repo #$repo_number: PF" >> "$SMS_REPORT"
-            # Fallback: Force-set the remote URL using your GitHub username.
+            # Fallback: set the remote URL and try again.
             local repo_name
             repo_name=$(basename "$repo_dir")
             log_msg "Repo #$repo_number: Attempting fallback: setting remote URL to git@github.com:kleinpanic/$repo_name.git"
@@ -366,6 +366,8 @@ update_repo() {
         echo "Repo #$repo_number: LC" >> "$SMS_REPORT"
         echo "LC"
     fi
+    # Clear the ERR trap for this function.
+    trap - ERR
 }
 
 echo "Starting auto git update script on $(date)" > "$REPORT"
