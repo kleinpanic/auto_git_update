@@ -448,3 +448,16 @@ if check_wifi; then
 else
     echo "No WiFi connection detected. Changes committed locally."
 fi
+
+update_repo_list() {
+    local repo_list_file="$HOME/.config/setup/autogitupdate.txt"
+    echo "Scanning for Git repositories..."
+    # Adjust the search path as needed (e.g., $HOME or a specific projects directory)
+    find "$HOME" -type d -name ".git" -prune | sed 's/\/.git$//' > "$repo_list_file"
+    echo "Repository list updated at $repo_list_file"
+}
+
+if [[ "$1" == "--update-repos" ]]; then
+    update_repo_list
+    exit 0
+fi
